@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'node:
 import { readFile, writeFile } from 'node:fs/promises';
 
 const payloadPath = process.argv[2] || 'payload.json';
+const T_CANDIDATE_LIMIT = 4;
 const passcode = process.env.H5_PASS;
 const apiUrl = process.env.LIVE_API_URL;
 const apiToken = process.env.API_ACCESS_TOKEN;
@@ -23,7 +24,10 @@ const response = await fetch(`${apiUrl}/api/analyze`, {
   headers: { 'Content-Type': 'application/json', 'X-Radar-Token': apiToken },
   body: JSON.stringify({
     action: 'scan',
-    frozenSymbols: [report.candidateLedger?.primary?.symbol, report.candidateLedger?.backup?.symbol].filter(Boolean),
+    frozenSymbols: (Array.isArray(report.candidateLedger?.candidates)
+      ? report.candidateLedger.candidates
+      : [report.candidateLedger?.primary, report.candidateLedger?.backup])
+      .map((item) => item?.symbol).filter(Boolean).slice(0, T_CANDIDATE_LIMIT),
     account: {
       cash: Number(report.account?.cash || 0),
       riskLimit: Number(report.account?.riskLimit || 0),
@@ -61,26 +65,31 @@ function candidate(item) {
   };
 }
 
+function savedCandidates() {
+  if (Array.isArray(report.candidateLedger?.candidates)) return report.candidateLedger.candidates.filter(Boolean).slice(0, T_CANDIDATE_LIMIT);
+  return [report.candidateLedger?.primary, report.candidateLedger?.backup].filter(Boolean).slice(0, T_CANDIDATE_LIMIT);
+}
+
+function ledgerResult(dateET, candidates, continuity) {
+  return { dateET, candidates, primary: candidates[0] || null, backup: candidates[1] || null, continuity };
+}
+
 function continueCandidates() {
   const dateET = analysis.session?.dateET || String(analysis.session?.etTime || '').slice(0, 10);
   const current = new Map((analysis.candidates || []).map((item) => [item.symbol, item]));
   const prior = report.candidateLedger;
   if (!prior || prior.dateET !== dateET) {
-    return { dateET, primary: analysis.candidates?.[0] || null, backup: analysis.candidates?.[1] || null, continuity: '今日名单首次冻结' };
+    return ledgerResult(dateET, (analysis.candidates || []).slice(0, T_CANDIDATE_LIMIT), '今日4只候选首次冻结');
   }
   const refresh = (saved) => {
     if (!saved) return null;
     return current.get(saved.symbol) || { ...saved, dataStatus: 'missing', quoteStatus: 'scheduled update missing; rank retained' };
   };
-  const oldPrimary = refresh(prior.primary);
-  const oldBackup = refresh(prior.backup);
-  if (oldPrimary && oldPrimary.setupStatus !== 'invalidated') {
-    return { dateET, primary: oldPrimary, backup: oldBackup?.setupStatus === 'invalidated' ? null : oldBackup, continuity: '原排名保留' };
-  }
-  if (oldBackup && oldBackup.setupStatus === 'valid') {
-    return { dateET, primary: oldBackup, backup: null, continuity: '原主选失效，唯一备选接替' };
-  }
-  return { dateET, primary: null, backup: null, continuity: '主选与备选均不合格，保持现金' };
+  const previous = savedCandidates().map(refresh);
+  const retained = previous.filter((item) => item?.setupStatus !== 'invalidated').slice(0, T_CANDIDATE_LIMIT);
+  if (!retained.length) return ledgerResult(dateET, [], '4只候选均不合格，保持现金');
+  if (previous[0]?.setupStatus === 'invalidated') return ledgerResult(dateET, retained, '主选失效，备选按次序接替');
+  return ledgerResult(dateET, retained, '原排名保留');
 }
 
 function updatePerformance(primary) {
@@ -124,6 +133,7 @@ report.dateLabel = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai',
 report.marketState = `${analysis.session?.label || '未知时段'} · ${analysis.marketGate?.label || '待判断'}`;
 report.primary = candidate(ledger.primary);
 report.backup = candidate(ledger.backup);
+report.shortlist = (ledger.candidates || []).map(candidate);
 report.directive = !analysis.noTrade && report.primary && report.primary.setupScorePct >= 55 && report.primary.tradeMath?.gate === 'pass'
   ? `主选 ${report.primary.symbol} 只等触发，未触发就不开仓`
   : '当前未见合格做T机会，保持现金';

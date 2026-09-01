@@ -69,6 +69,18 @@ button { -webkit-tap-highlight-color: transparent; }
 .card { border: 1px solid #dfe6df; border-radius: 19px; background: white; box-shadow: 0 10px 32px rgba(30,52,38,.06); }
 .live-control-card { padding: 16px; }
 .live-intro { margin: 0; color: #65746b; font-size: 12px; line-height: 1.65; }
+.portfolio-editor { display: grid; gap: 11px; padding: 16px; }
+.portfolio-intro { margin: 0; color: #65746b; font-size: 12px; line-height: 1.6; }
+.portfolio-cash-label { display: grid; gap: 6px; color: #405348; font-size: 12px; font-weight: 750; }
+.portfolio-cash-label input, .portfolio-holding-row input { width: 100%; min-width: 0; height: 43px; border: 1px solid #d4ddd6; border-radius: 11px; padding: 0 11px; background: #fff; outline: none; }
+.portfolio-cash-label input:focus, .portfolio-holding-row input:focus { border-color: #2a7650; box-shadow: 0 0 0 3px rgba(42,118,80,.1); }
+.portfolio-holdings-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.portfolio-holdings-head strong { font-size: 13px; }
+.portfolio-holdings-head span, .portfolio-feedback { color: #7a887f; font-size: 10px; }
+.portfolio-holding-rows { display: grid; gap: 7px; }
+.portfolio-holding-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px auto; gap: 7px; }
+.remove-holding-button { min-width: 48px; border: 0; border-radius: 11px; padding: 0 9px; background: #fff0ef; color: #983f39; font-size: 11px; font-weight: 750; }
+.portfolio-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; }
 .action-button { min-height: 45px; border: 0; border-radius: 13px; padding: 10px 12px; font-weight: 750; cursor: pointer; }
 .action-button.primary { background: #173f2b; color: white; }
@@ -159,6 +171,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .rank { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; font-size: 12px; font-weight: 800; }
 .rank-1 { background: #e8f5ed; color: #17603b; }
 .rank-2 { background: #f8f0dc; color: #896316; }
+.rank-3 { background: #edf2fa; color: #466488; }
+.rank-4 { background: #f5eff7; color: #785588; }
 .empty-copy { margin: 18px 0 2px; padding: 18px; border: 1px dashed #d5ded7; border-radius: 14px; background: #fafbf9; color: #718078; font-size: 13px; line-height: 1.6; text-align: center; }
 .quote-line { align-items: end; margin-top: 16px; }
 .quote-line > div { display: grid; gap: 2px; }
