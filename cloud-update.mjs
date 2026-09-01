@@ -21,17 +21,21 @@ const report = JSON.parse(Buffer.concat([
 const response = await fetch(`${apiUrl}/api/analyze`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-Radar-Token': apiToken },
-  body: JSON.stringify({ action: 'scan' }),
+  body: JSON.stringify({
+    action: 'scan',
+    frozenSymbols: [report.candidateLedger?.primary?.symbol, report.candidateLedger?.backup?.symbol].filter(Boolean),
+    account: {
+      cash: Number(report.account?.cash || 0),
+      riskLimit: Number(report.account?.riskLimit || 0),
+      feePerSide: Number(report.account?.feePerSide ?? 1),
+    },
+  }),
 });
 if (!response.ok) throw new Error(`Cloud analysis failed: ${response.status}`);
 const analysis = await response.json();
 
 function candidate(item) {
   if (!item) return null;
-  const riskPerShare = Math.max(0.01, Number(item.price) - Number(String(item.invalidation).match(/[\d.]+/)?.[0] || item.price));
-  const feeBudget = Number(report.account?.feePerSide || 1) * 2;
-  const riskShares = Math.max(0, Math.floor((Number(report.account?.riskLimit || 0) - feeBudget) / riskPerShare));
-  const cashShares = Math.max(0, Math.floor((Number(report.account?.cash || 0) - Number(report.account?.feePerSide || 1)) / Number(item.price)));
   return {
     symbol: item.symbol,
     name: item.name,
@@ -42,23 +46,88 @@ function candidate(item) {
     stop: item.invalidation,
     target: `$${item.firstTarget}`,
     noChase: item.noChase,
-    shares: Math.min(riskShares, cashShares),
+    shares: item.tradeMath?.shares ?? 0,
     status: item.scoreLabel,
     setupScorePct: item.setupScorePct,
+    leaderboardScorePct: item.leaderboardScorePct,
+    moverRank: item.moverRank,
+    setupStatus: item.setupStatus,
+    dataStatus: item.dataStatus,
+    triggerPrice: item.triggerPrice,
+    invalidationPrice: item.invalidationPrice,
+    firstTarget: item.firstTarget,
+    tradeMath: item.tradeMath,
+    openingAudit: item.openingAudit,
   };
 }
+
+function continueCandidates() {
+  const dateET = analysis.session?.dateET || String(analysis.session?.etTime || '').slice(0, 10);
+  const current = new Map((analysis.candidates || []).map((item) => [item.symbol, item]));
+  const prior = report.candidateLedger;
+  if (!prior || prior.dateET !== dateET) {
+    return { dateET, primary: analysis.candidates?.[0] || null, backup: analysis.candidates?.[1] || null, continuity: '今日名单首次冻结' };
+  }
+  const refresh = (saved) => {
+    if (!saved) return null;
+    return current.get(saved.symbol) || { ...saved, dataStatus: 'missing', quoteStatus: 'scheduled update missing; rank retained' };
+  };
+  const oldPrimary = refresh(prior.primary);
+  const oldBackup = refresh(prior.backup);
+  if (oldPrimary && oldPrimary.setupStatus !== 'invalidated') {
+    return { dateET, primary: oldPrimary, backup: oldBackup?.setupStatus === 'invalidated' ? null : oldBackup, continuity: '原排名保留' };
+  }
+  if (oldBackup && oldBackup.setupStatus === 'valid') {
+    return { dateET, primary: oldBackup, backup: null, continuity: '原主选失效，唯一备选接替' };
+  }
+  return { dateET, primary: null, backup: null, continuity: '主选与备选均不合格，保持现金' };
+}
+
+function updatePerformance(primary) {
+  const dateET = analysis.session?.dateET || String(analysis.session?.etTime || '').slice(0, 10);
+  const records = Array.isArray(report.performance20d) ? report.performance20d : [];
+  let record = records.find((item) => item.dateET === dateET);
+  if (!record) {
+    record = { dateET, symbol: primary?.symbol || null, noTrade: Boolean(analysis.noTrade), createdAt: analysis.generatedAt };
+    records.push(record);
+  }
+  if (primary) {
+    if (!record.referencePrice || record.symbol !== primary.symbol) record.referencePrice = primary.price;
+    record.symbol = primary.symbol;
+    record.score = primary.setupScorePct;
+    record.leaderboardScore = primary.leaderboardScorePct;
+    record.moverRank = primary.moverRank;
+    record.highestPrice = Math.max(Number(record.highestPrice || primary.high), Number(primary.high || primary.price));
+    record.lowestPrice = Math.min(Number(record.lowestPrice || primary.low), Number(primary.low || primary.price));
+    record.top20 = Number(primary.moverRank) > 0 && Number(primary.moverRank) <= 20;
+    const eligibleMovers = Number(analysis.breadth?.eligibleMoverCount || 0);
+    record.top10Pct = eligibleMovers > 0 && Number(primary.moverRank) <= Math.max(1, Math.ceil(eligibleMovers * 0.1));
+    record.setupStatus = primary.setupStatus;
+    if (record.referencePrice) {
+      record.mfePct = Number((((record.highestPrice / record.referencePrice) - 1) * 100).toFixed(2));
+      record.maePct = Number((((record.lowestPrice / record.referencePrice) - 1) * 100).toFixed(2));
+    }
+  }
+  record.noTrade = Boolean(analysis.noTrade);
+  record.updatedAt = analysis.generatedAt;
+  report.performance20d = records.slice(-20);
+}
+
+const ledger = continueCandidates();
+report.candidateLedger = ledger;
+updatePerformance(ledger.primary);
 
 report.generatedAt = analysis.generatedAt;
 report.session = analysis.session?.code || 'unknown';
 report.marketClock = analysis.session?.etTime || report.marketClock;
 report.dateLabel = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date());
-report.marketState = `${analysis.session?.label || '未知时段'} · ${analysis.scoreInterpretation}`;
-report.primary = candidate(analysis.candidates?.[0]);
-report.backup = candidate(analysis.candidates?.[1]);
-report.directive = report.primary && report.primary.setupScorePct >= 55
+report.marketState = `${analysis.session?.label || '未知时段'} · ${analysis.marketGate?.label || '待判断'}`;
+report.primary = candidate(ledger.primary);
+report.backup = candidate(ledger.backup);
+report.directive = !analysis.noTrade && report.primary && report.primary.setupScorePct >= 55 && report.primary.tradeMath?.gate === 'pass'
   ? `主选 ${report.primary.symbol} 只等触发，未触发就不开仓`
   : '当前未见合格做T机会，保持现金';
-report.summary = analysis.warnings?.[0] || '条件分只用于研究排序，不代表上涨概率。';
+report.summary = `${analysis.marketGate?.rationale || ''}${ledger.continuity ? `；${ledger.continuity}` : ''}`;
 report.dataStatus = `${analysis.provider} · ${analysis.generatedAt}`;
 report.liveSnapshot = analysis;
 report.liveApi = { baseUrl: apiUrl, accessToken: apiToken };

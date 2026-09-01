@@ -1,4 +1,4 @@
-const CACHE = 'meigu-action-desk-v2';
+const CACHE = 'meigu-action-desk-v3';
 const CORE = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (event) => {

@@ -1,6 +1,9 @@
 const app = document.querySelector('#app');
 const KEY_STORAGE = 'meigu-h5-key-v1';
 const KEY_EXPIRY = 'meigu-h5-key-expiry-v1';
+const LEDGER_STORAGE = 'meigu-h5-candidate-ledger-v1';
+const PERFORMANCE_STORAGE = 'meigu-h5-performance-v1';
+const TRADE_STORAGE = 'meigu-h5-trades-v1';
 const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 let liveConfig = null;
 
@@ -12,6 +15,25 @@ function node(tag, className = '', text = '') {
   if (className) element.className = className;
   if (text !== '') element.textContent = String(text);
   return element;
+}
+
+function readLocalJson(key, fallback) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key));
+    return value ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocalJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function formatSigned(value, digits = 2) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'N/A';
+  return `${numeric >= 0 ? '+' : ''}${numeric.toFixed(digits)}%`;
 }
 
 function icon(name) {
@@ -174,60 +196,290 @@ function candidateCard(candidate, title, rank) {
   return card;
 }
 
-function liveCandidateCard(candidate, rank) {
+function scanDate(result) {
+  return result.session?.dateET || String(result.session?.etTime || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+}
+
+function frozenSymbols() {
+  const ledger = readLocalJson(LEDGER_STORAGE, null);
+  return [ledger?.primary?.symbol, ledger?.backup?.symbol].filter(Boolean);
+}
+
+function applyCandidateContinuity(result, action) {
+  if (action !== 'scan') {
+    result.actionableCandidates = result.candidates || [];
+    return result;
+  }
+  const dateET = scanDate(result);
+  const incoming = new Map((result.candidates || []).map((candidate) => [candidate.symbol, candidate]));
+  let ledger = readLocalJson(LEDGER_STORAGE, null);
+  if (!ledger || ledger.dateET !== dateET) {
+    ledger = { dateET, primary: result.candidates?.[0] || null, backup: result.candidates?.[1] || null };
+    writeLocalJson(LEDGER_STORAGE, ledger);
+    result.actionableCandidates = [ledger.primary, ledger.backup].filter(Boolean);
+    result.continuity = { label: '今日名单已冻结', detail: '只保留一只主选和一只唯一备选；新发现只进入事件雷达。' };
+    return result;
+  }
+
+  const refresh = (saved) => {
+    if (!saved) return null;
+    const current = incoming.get(saved.symbol);
+    return current || { ...saved, dataStatus: 'missing', quoteStatus: '本次实时数据缺失', continuityWarning: '数据缺失不等于转弱；保留排名并等待重查。' };
+  };
+  const oldPrimary = refresh(ledger.primary);
+  const oldBackup = refresh(ledger.backup);
+  let primary = null;
+  let backup = null;
+  let label = '原排名保留';
+  let detail = '主选未触发明确失效条件，不因新股票数据较新而换选。';
+  if (oldPrimary && oldPrimary.setupStatus !== 'invalidated') {
+    primary = oldPrimary;
+    backup = oldBackup?.setupStatus === 'invalidated' ? null : oldBackup;
+  } else if (oldBackup && oldBackup.setupStatus === 'valid') {
+    primary = oldBackup;
+    label = '主选失效，唯一备选接替';
+    detail = `${ledger.primary?.symbol || '原主选'} 已触发失效；不临时加入第三只股票。`;
+  } else {
+    label = '主选与备选均不合格';
+    detail = '今日行动分支为现金；其他股票只留在事件雷达。';
+  }
+  ledger = { dateET, primary, backup };
+  writeLocalJson(LEDGER_STORAGE, ledger);
+  result.actionableCandidates = [primary, backup].filter(Boolean);
+  result.continuity = { label, detail };
+  if (!primary) result.noTrade = true;
+  return result;
+}
+
+function updatePerformance(result, action) {
+  if (action !== 'scan') return;
+  const dateET = scanDate(result);
+  const candidate = result.actionableCandidates?.[0] || null;
+  const records = readLocalJson(PERFORMANCE_STORAGE, []);
+  let record = records.find((item) => item.dateET === dateET);
+  if (!record) {
+    record = { dateET, symbol: candidate?.symbol || null, noTrade: Boolean(result.noTrade), createdAt: result.generatedAt };
+    records.push(record);
+  }
+  if (candidate) {
+    if (!record.referencePrice || record.symbol !== candidate.symbol) record.referencePrice = candidate.price;
+    record.symbol = candidate.symbol;
+    record.score = candidate.setupScorePct;
+    record.leaderboardScore = candidate.leaderboardScorePct;
+    record.moverRank = candidate.moverRank;
+    record.highestPrice = Math.max(Number(record.highestPrice || candidate.high), Number(candidate.high || candidate.price));
+    record.lowestPrice = Math.min(Number(record.lowestPrice || candidate.low), Number(candidate.low || candidate.price));
+    const eligibleMovers = Number(result.breadth?.eligibleMoverCount || 0);
+    record.top20 = Number(candidate.moverRank) > 0 && Number(candidate.moverRank) <= 20;
+    record.top10Pct = eligibleMovers > 0 && Number(candidate.moverRank) <= Math.max(1, Math.ceil(eligibleMovers * 0.1));
+    record.setupStatus = candidate.setupStatus;
+  }
+  record.noTrade = Boolean(result.noTrade);
+  record.updatedAt = result.generatedAt;
+  writeLocalJson(PERFORMANCE_STORAGE, records.slice(-20));
+}
+
+function statusTone(value) {
+  if (/valid|pass|通过|可进攻|优先/.test(String(value))) return 'green';
+  if (/invalid|reject|失效|不开仓/.test(String(value))) return 'red';
+  return 'gold-light';
+}
+
+function marketGateCard(result) {
+  const card = node('section', 'market-gate-card');
+  const top = node('div', 'market-gate-top');
+  const title = node('div');
+  title.append(node('span', '', '大市门槛'), node('strong', '', result.marketGate?.label || '待判断'));
+  top.append(title, pill(result.session?.label || '未知时段', statusTone(result.marketGate?.label)));
+  const grid = node('div', 'market-metrics');
+  [['SPY', formatSigned(result.marketGate?.spyChangePct)], ['QQQ', formatSigned(result.marketGate?.qqqChangePct)], ['上涨宽度', `${result.breadth?.advancePct ?? 'N/A'}%`]].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    grid.append(item);
+  });
+  const sectors = node('div', 'sector-strip');
+  (result.leadingSectors || []).slice(0, 4).forEach((sector) => sectors.append(pill(`${sector.sector} ${formatSigned(sector.medianChangePct)}`, sector.medianChangePct > 0 ? 'green' : 'neutral')));
+  card.append(top, node('p', '', result.marketGate?.rationale || ''), grid, sectors);
+  return card;
+}
+
+function auditBlock(audit) {
+  const details = node('details', 'audit-block');
+  const summary = node('summary');
+  summary.append(node('strong', '', '09:35 ET 审计'), pill(audit?.label || '待执行', statusTone(audit?.status)));
+  details.append(summary);
+  const checks = node('div', 'audit-checks');
+  (audit?.checks || []).forEach((check) => {
+    const row = node('div');
+    row.append(node('strong', '', check.item), pill(check.status, statusTone(check.status)), node('span', '', check.detail));
+    checks.append(row);
+  });
+  details.append(checks);
+  return details;
+}
+
+function liveCandidateCard(candidate, rank, role = '') {
   const card = node('article', 'live-result-card');
   const top = node('div', 'live-result-top');
   const identity = node('div');
-  identity.append(node('strong', 'ticker', candidate.symbol), node('span', 'company', candidate.name));
-  const score = node('div', 'score-badge');
-  score.append(node('strong', '', `${candidate.setupScorePct}%`), node('span', '', '做T条件分'));
-  top.append(identity, score);
+  identity.append(node('span', 'role-label', role || `候选 ${rank + 1}`), node('strong', 'ticker', candidate.symbol), node('span', 'company', candidate.name));
+  const scoreStack = node('div', 'score-stack');
+  const setupScore = node('div', 'score-badge');
+  setupScore.append(node('strong', '', `${candidate.setupScorePct}%`), node('span', '', '做T条件分'));
+  const boardScore = node('div', 'score-badge board-score');
+  boardScore.append(node('strong', '', `${candidate.leaderboardScorePct ?? '—'}%`), node('span', '', '榜前条件分'));
+  scoreStack.append(setupScore, boardScore);
+  top.append(identity, scoreStack);
 
   const quote = node('div', 'live-quote');
   quote.append(
     node('strong', '', `$${Number(candidate.price).toFixed(2)}`),
-    node('span', Number(candidate.changePct) >= 0 ? 'up' : 'down', `${Number(candidate.changePct) >= 0 ? '+' : ''}${Number(candidate.changePct).toFixed(2)}%`),
-    pill(candidate.scoreLabel, candidate.setupScorePct >= 70 ? 'green' : candidate.setupScorePct >= 55 ? 'gold-light' : 'neutral'),
+    node('span', Number(candidate.changePct) >= 0 ? 'up' : 'down', formatSigned(candidate.changePct)),
+    pill(candidate.scoreLabel, statusTone(candidate.scoreLabel)),
+    pill(candidate.setupStatus || 'unknown', statusTone(candidate.setupStatus)),
   );
+  if (candidate.moverRank) quote.append(pill(`流动性榜 #${candidate.moverRank}`, 'neutral'));
+
+  if (candidate.catalyst) {
+    const catalyst = node('div', 'catalyst-box');
+    catalyst.append(node('strong', '', `${candidate.catalyst.category} · ${candidate.catalyst.evidenceStatus}`), node('span', '', candidate.catalyst.title));
+    card.append(top, quote, catalyst);
+  } else {
+    card.append(top, quote, node('p', 'no-catalyst', '未发现可核实催化线索；不可只因价格上升而入场。'));
+  }
 
   const reasonList = node('ul', 'reason-list');
-  (candidate.reasons || []).slice(0, 4).forEach((reason) => reasonList.append(node('li', '', reason)));
+  (candidate.reasons || []).slice(0, 6).forEach((reason) => reasonList.append(node('li', '', reason)));
+  const math = candidate.tradeMath || {};
   const plan = node('div', 'live-plan');
-  [['观察触发', candidate.trigger], ['失效条件', candidate.invalidation], ['首个目标', `$${candidate.firstTarget}`], ['不可追价', candidate.noChase]].forEach(([label, value]) => {
+  [
+    ['观察触发', candidate.trigger], ['失效条件', candidate.invalidation], ['首个目标', `$${candidate.firstTarget}`],
+    ['最高追价', candidate.noChase], ['时间止损', candidate.timeStop],
+    ['股数 / 净R', math.shares === null || math.shares === undefined ? '待计算' : `${math.shares}股 · ${math.netR ?? 'N/A'}R`],
+  ].forEach(([label, value]) => {
     const item = node('div');
     item.append(node('span', '', label), node('strong', '', value));
     plan.append(item);
   });
   const foot = node('p', 'live-result-foot', `${candidate.quoteStatus} · ${candidate.feeNote}`);
-  card.append(top, quote, reasonList, plan, foot);
+  card.append(reasonList, plan, auditBlock(candidate.openingAudit), foot);
+  if (candidate.continuityWarning) card.append(node('p', 'continuity-warning', candidate.continuityWarning));
   if (rank === 0) card.classList.add('primary-live');
   return card;
 }
 
-function renderLiveResults(container, result) {
+function eventRadarBlock(events) {
+  const section = node('section', 'radar-block');
+  const head = node('div', 'subsection-head');
+  head.append(node('strong', '', '催化事件雷达'), pill(`${events.length} 条线索`, 'neutral'));
+  section.append(head);
+  if (!events.length) {
+    section.append(node('p', 'live-empty', '暂未发现财报、FDA/临床、订单、并购、监管、产品或分析师修正线索。'));
+    return section;
+  }
+  const list = node('div', 'event-list');
+  events.forEach((event) => {
+    const item = event.url ? node('a', 'event-item') : node('div', 'event-item');
+    if (event.url) { item.href = event.url; item.target = '_blank'; item.rel = 'noopener noreferrer'; }
+    const top = node('div');
+    top.append(node('strong', '', event.symbol), pill(event.category, 'gold-light'));
+    item.append(top, node('span', '', event.title), node('small', '', `${event.created} · ${event.publisher} · ${event.actionability}`));
+    list.append(item);
+  });
+  section.append(list);
+  return section;
+}
+
+function macroBlock(events) {
+  if (!events?.length) return null;
+  const section = node('section', 'macro-block');
+  section.append(node('strong', '', '今日高影响经济事件'));
+  events.forEach((event) => section.append(node('p', '', `${event.etTime} · ${event.event}${event.consensus ? ` · 预期 ${event.consensus}` : ''}`)));
+  section.append(node('small', '', '若事件在 10:00 ET 公布，通常等公布后约5分钟再做开盘审计。'));
+  return section;
+}
+
+function performanceBlock(report) {
+  const section = node('section', 'performance-block');
+  const localRecords = readLocalJson(PERFORMANCE_STORAGE, []);
+  const cloudRecords = Array.isArray(report.performance20d) ? report.performance20d : [];
+  const merged = [...cloudRecords, ...localRecords].reduce((map, item) => map.set(`${item.dateET}-${item.symbol || 'cash'}`, item), new Map());
+  const records = [...merged.values()].sort((left, right) => String(left.dateET).localeCompare(String(right.dateET))).slice(-20);
+  const trades = readLocalJson(TRADE_STORAGE, []).slice(-20);
+  const top20 = records.filter((item) => item.top20).length;
+  const top10 = records.filter((item) => item.top10Pct).length;
+  const excursions = records.filter((item) => item.referencePrice && item.highestPrice && item.lowestPrice);
+  const mfe = excursions.length ? excursions.reduce((sum, item) => sum + ((item.highestPrice / item.referencePrice) - 1) * 100, 0) / excursions.length : null;
+  const mae = excursions.length ? excursions.reduce((sum, item) => sum + ((item.lowestPrice / item.referencePrice) - 1) * 100, 0) / excursions.length : null;
+  const netPnl = trades.length ? trades.reduce((sum, item) => sum + Number(item.netPnl || 0), 0) : null;
+  const head = node('div', 'subsection-head');
+  head.append(node('strong', '', '20个交易日滚动复盘'), pill(`${records.length}/20 日`, 'neutral'));
+  const metrics = node('div', 'performance-grid');
+  [['前20名次数', `${top20}`], ['前10%次数', `${top10}`], ['平均MFE', formatSigned(mfe)], ['平均MAE', formatSigned(mae)], ['已记录净盈亏', netPnl === null ? 'N/A' : `$${netPnl.toFixed(2)}`]].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    metrics.append(item);
+  });
+
+  const form = node('form', 'trade-log-form');
+  const primary = readLocalJson(LEDGER_STORAGE, null)?.primary;
+  const ticker = node('input'); ticker.placeholder = '代码'; ticker.value = primary?.symbol || '';
+  const entry = node('input'); entry.type = 'number'; entry.step = '0.001'; entry.placeholder = '实际买价';
+  const exit = node('input'); exit.type = 'number'; exit.step = '0.001'; exit.placeholder = '实际卖价';
+  const shares = node('input'); shares.type = 'number'; shares.step = '1'; shares.min = '1'; shares.placeholder = '股数'; shares.value = primary?.tradeMath?.shares || '';
+  const save = node('button', 'action-button secondary', '记录实际成交'); save.type = 'submit';
+  const feedback = node('span', 'trade-feedback', '实际成交需手动记录；系统不会连接券商落单。');
+  form.append(ticker, entry, exit, shares, save, feedback);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const qty = Number(shares.value);
+    const buy = Number(entry.value);
+    const sell = Number(exit.value);
+    if (!ticker.value || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(buy) || !Number.isFinite(sell)) {
+      feedback.textContent = '请填写代码、买价、卖价及股数。';
+      return;
+    }
+    const fee = Number(report.account?.feePerSide ?? 1) * 2;
+    const net = (sell - buy) * qty - fee;
+    const risk = primary?.invalidationPrice ? Math.max(0.01, (buy - primary.invalidationPrice) * qty + fee) : null;
+    const stored = readLocalJson(TRADE_STORAGE, []);
+    stored.push({ dateET: new Date().toISOString().slice(0, 10), symbol: ticker.value.toUpperCase(), buy, sell, shares: qty, netPnl: net, realizedR: risk ? net / risk : null });
+    writeLocalJson(TRADE_STORAGE, stored.slice(-40));
+    feedback.textContent = `已记录：费用后 ${net >= 0 ? '+' : ''}$${net.toFixed(2)}。重新分析即可刷新汇总。`;
+    entry.value = ''; exit.value = '';
+  });
+  section.append(head, metrics, form);
+  return section;
+}
+
+function renderLiveResults(container, result, action, report) {
   container.replaceChildren();
   const meta = node('div', 'live-meta');
-  meta.append(
-    pill(result.session?.label || '未知时段', 'green'),
-    node('span', '', `${result.session?.etTime || ''} · ${result.provider || ''}`),
-  );
-  container.append(meta);
-  if (result.noTrade) {
-    container.append(node('p', 'live-empty no-trade-box', '当前条件不足：可以观察，但唔建议为了交易而交易。'));
+  meta.append(pill(result.session?.label || '未知时段', 'green'), node('span', '', `${result.session?.etTime || ''} · ${result.provider || ''}`));
+  container.append(meta, marketGateCard(result));
+  const macro = macroBlock(result.macroEvents);
+  if (macro) container.append(macro);
+  if (result.continuity) {
+    const continuity = node('div', 'continuity-box');
+    continuity.append(node('strong', '', result.continuity.label), node('span', '', result.continuity.detail));
+    container.append(continuity);
   }
-  if (!result.candidates?.length) {
+  if (result.noTrade) container.append(node('p', 'live-empty no-trade-box', '当前行动分支：保持现金。候选只供观察，必须等大市、触发、费用后净R及券商审计同时合格。'));
+  const displayed = action === 'scan' ? (result.actionableCandidates || []) : (result.candidates || []);
+  if (!displayed.length) {
     container.append(node('p', 'live-empty', '暂时无足够数据或无合格候选，保持现金／稍后重试。'));
   } else {
     const list = node('div', 'live-result-list');
-    result.candidates.forEach((candidate, index) => list.append(liveCandidateCard(candidate, index)));
+    displayed.forEach((candidate, index) => list.append(liveCandidateCard(candidate, index, action === 'scan' ? (index === 0 ? '主选' : '唯一备选') : '个股审查')));
     container.append(list);
   }
+  if (action === 'scan') container.append(eventRadarBlock(result.eventRadar || []), performanceBlock(report));
   const warning = node('div', 'live-warning');
   (result.warnings || []).forEach((text) => warning.append(node('p', '', text)));
   container.append(warning);
 }
 
-async function requestLiveAnalysis(action, symbols, button, results) {
+async function requestLiveAnalysis(action, symbols, button, results, report) {
   if (!liveConfig?.baseUrl || !liveConfig?.accessToken) {
     results.replaceChildren(node('p', 'live-empty', '云端分析尚未连接，请等待下一次部署。'));
     return;
@@ -240,10 +492,21 @@ async function requestLiveAnalysis(action, symbols, button, results) {
     const response = await fetch(`${liveConfig.baseUrl}/api/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Radar-Token': liveConfig.accessToken },
-      body: JSON.stringify({ action, symbols }),
+      body: JSON.stringify({
+        action,
+        symbols,
+        frozenSymbols: action === 'scan' ? frozenSymbols() : [],
+        account: {
+          cash: Number(report.account?.cash || 0),
+          riskLimit: Number(report.account?.riskLimit || 0),
+          feePerSide: Number(report.account?.feePerSide ?? 1),
+        },
+      }),
     });
     if (!response.ok) throw new Error('分析服务暂时不可用');
-    renderLiveResults(results, await response.json());
+    const result = applyCandidateContinuity(await response.json(), action);
+    updatePerformance(result, action);
+    renderLiveResults(results, result, action, report);
   } catch {
     results.replaceChildren(node('p', 'live-empty error-box', '即时分析暂时失败，请稍后再试；正式报告仍可正常查看。'));
   } finally {
@@ -260,7 +523,7 @@ function liveTools(report) {
   head.append(title, pill('无需等定时', 'green'));
 
   const panel = node('div', 'card live-control-card');
-  const intro = node('p', 'live-intro', '按钮会即时读取盘前、盘中或盘后公开行情；夜盘覆盖不足会直接提示，唔会用旧数据冒充。');
+  const intro = node('p', 'live-intro', '先跑催化雷达，再检查大市、行业、相对强度、量价、费用后净R及09:35审计。只冻结一只主选和一只唯一备选；两只失败就保持现金。');
   const quickActions = node('div', 'quick-actions');
   const holdingsButton = node('button', 'action-button secondary', '分析现有持仓');
   const scanButton = node('button', 'action-button primary', '一键筛选可做T');
@@ -273,15 +536,15 @@ function liveTools(report) {
   const customButton = node('button', 'action-button secondary', '分析自选');
   const results = node('div', 'live-results');
 
-  holdingsButton.addEventListener('click', () => requestLiveAnalysis('analyze', report.holdings.map((item) => item.symbol), holdingsButton, results));
-  scanButton.addEventListener('click', () => requestLiveAnalysis('scan', [], scanButton, results));
+  holdingsButton.addEventListener('click', () => requestLiveAnalysis('analyze', report.holdings.map((item) => item.symbol), holdingsButton, results, report));
+  scanButton.addEventListener('click', () => requestLiveAnalysis('scan', [], scanButton, results, report));
   customButton.addEventListener('click', () => {
     const symbols = input.value.toUpperCase().split(/[\s,，]+/).filter(Boolean);
     if (!symbols.length) {
       results.replaceChildren(node('p', 'live-empty error-box', '请先输入至少一个股票代码。'));
       return;
     }
-    requestLiveAnalysis('analyze', symbols, customButton, results);
+    requestLiveAnalysis('analyze', symbols, customButton, results, report);
   });
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
