@@ -259,7 +259,7 @@ function applyCandidateContinuity(result, action) {
   let ledger = readLocalJson(LEDGER_STORAGE, null);
   if (!ledger || ledger.dateET !== dateET) {
     const candidates = (result.candidates || []).slice(0, MAX_T_CANDIDATES);
-    ledger = { dateET, candidates, primary: candidates[0] || null, backup: candidates[1] || null };
+    ledger = { version: 2, dateET, candidates, primary: candidates[0] || null, backup: candidates[1] || null };
     writeLocalJson(LEDGER_STORAGE, ledger);
     result.actionableCandidates = candidates;
     result.continuity = { label: '今日4只候选已冻结', detail: '主选加3只按次序备用；同一时间只执行一只，不会四只同时入场。' };
@@ -272,10 +272,15 @@ function applyCandidateContinuity(result, action) {
     return current || { ...saved, dataStatus: 'missing', quoteStatus: '本次实时数据缺失', continuityWarning: '数据缺失不等于转弱；保留排名并等待重查。' };
   };
   const previous = ledgerCandidates(ledger).map(refresh);
-  const retained = previous.filter((candidate) => candidate?.setupStatus !== 'invalidated').slice(0, MAX_T_CANDIDATES);
+  let retained = previous.filter((candidate) => candidate?.setupStatus !== 'invalidated').slice(0, MAX_T_CANDIDATES);
   let label = '原排名保留';
   let detail = '已冻结候选未触发明确失效条件，不因新出现股票而改变次序。';
-  if (previous[0]?.setupStatus === 'invalidated' && retained.length) {
+  if (ledger.version !== 2) {
+    const symbols = new Set(retained.map((candidate) => candidate.symbol));
+    retained = [...retained, ...(result.candidates || []).filter((candidate) => !symbols.has(candidate.symbol))].slice(0, MAX_T_CANDIDATES);
+    label = '旧版名单已扩展为4只';
+    detail = '保留原主选和备选次序，并一次性补足其余候选；之后同日不再以新股票替换。';
+  } else if (previous[0]?.setupStatus === 'invalidated' && retained.length) {
     label = '主选失效，备选按次序接替';
     detail = `${previous[0].symbol} 已失效；下一只已冻结候选接替主选，不临时加入新股票。`;
   } else if (!retained.length) {
@@ -285,7 +290,7 @@ function applyCandidateContinuity(result, action) {
     const missing = previous.filter((candidate) => candidate?.dataStatus === 'missing').length;
     if (missing) detail = `${missing} 只候选本次数据缺失，保留原次序并等待重查。`;
   }
-  ledger = { dateET, candidates: retained, primary: retained[0] || null, backup: retained[1] || null };
+  ledger = { version: 2, dateET, candidates: retained, primary: retained[0] || null, backup: retained[1] || null };
   writeLocalJson(LEDGER_STORAGE, ledger);
   result.actionableCandidates = retained;
   result.continuity = { label, detail };

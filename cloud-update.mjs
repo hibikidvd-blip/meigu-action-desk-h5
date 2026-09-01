@@ -71,7 +71,7 @@ function savedCandidates() {
 }
 
 function ledgerResult(dateET, candidates, continuity) {
-  return { dateET, candidates, primary: candidates[0] || null, backup: candidates[1] || null, continuity };
+  return { version: 2, dateET, candidates, primary: candidates[0] || null, backup: candidates[1] || null, continuity };
 }
 
 function continueCandidates() {
@@ -86,7 +86,12 @@ function continueCandidates() {
     return current.get(saved.symbol) || { ...saved, dataStatus: 'missing', quoteStatus: 'scheduled update missing; rank retained' };
   };
   const previous = savedCandidates().map(refresh);
-  const retained = previous.filter((item) => item?.setupStatus !== 'invalidated').slice(0, T_CANDIDATE_LIMIT);
+  let retained = previous.filter((item) => item?.setupStatus !== 'invalidated').slice(0, T_CANDIDATE_LIMIT);
+  if (prior.version !== 2) {
+    const symbols = new Set(retained.map((item) => item.symbol));
+    retained = [...retained, ...(analysis.candidates || []).filter((item) => !symbols.has(item.symbol))].slice(0, T_CANDIDATE_LIMIT);
+    return ledgerResult(dateET, retained, '旧版名单已扩展为4只');
+  }
   if (!retained.length) return ledgerResult(dateET, [], '4只候选均不合格，保持现金');
   if (previous[0]?.setupStatus === 'invalidated') return ledgerResult(dateET, retained, '主选失效，备选按次序接替');
   return ledgerResult(dateET, retained, '原排名保留');
