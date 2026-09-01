@@ -1,0 +1,17 @@
+{
+  "name": "美股行动台",
+  "short_name": "行动台",
+  "description": "私人美股筛选与持仓行动页面",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f7f4",
+  "theme_color": "#173f2b",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
