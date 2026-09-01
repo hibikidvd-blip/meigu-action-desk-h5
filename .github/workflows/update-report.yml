@@ -1,0 +1,40 @@
+name: Update encrypted market report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 12 * * 1-5'
+    - cron: '40 13 * * 1-5'
+    - cron: '40 14 * * 1-5'
+    - cron: '10 20 * * 1-5'
+    - cron: '10 21 * * 1-5'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: encrypted-market-report
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate encrypted report
+        run: node cloud-update.mjs payload.json
+        env:
+          H5_PASS: ${{ secrets.H5_PASS }}
+          LIVE_API_URL: ${{ secrets.LIVE_API_URL }}
+          API_ACCESS_TOKEN: ${{ secrets.API_ACCESS_TOKEN }}
+      - name: Publish changed payload
+        run: |
+          git config user.name "meigu-action-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add payload.json
+          git diff --cached --quiet || git commit -m "Update encrypted market report"
+          git push
