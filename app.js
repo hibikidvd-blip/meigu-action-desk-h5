@@ -415,6 +415,131 @@ function liveCandidateCard(candidate, rank, role = '') {
   return card;
 }
 
+function dailyStructureBlock(daily) {
+  const section = node('section', 'daily-structure');
+  const head = node('div', 'subsection-head');
+  head.append(node('strong', '', '日线结构'), pill(daily?.label || '日线资料不足', statusTone(daily?.label)));
+  section.append(head);
+  if (!daily || daily.dataStatus === 'insufficient') {
+    section.append(node('p', 'daily-note', daily?.signals?.[0] || '日线资料不足，暂不把它解读成弱势。'));
+    return section;
+  }
+  const grid = node('div', 'daily-metrics');
+  [
+    ['20／50／200日', `${daily.ma20 ?? 'N/A'} / ${daily.ma50 ?? 'N/A'} / ${daily.ma200 ?? 'N/A'}`],
+    ['近5／20／60日', `${formatSigned(daily.ret5)} / ${formatSigned(daily.ret20)} / ${formatSigned(daily.ret60)}`],
+    ['相对SPY 20／60日', `${formatSigned(daily.relative20)} / ${formatSigned(daily.relative60)}`],
+    ['20日高低', `${daily.low20 ?? 'N/A'} – ${daily.high20 ?? 'N/A'}`],
+    ['距20日线', formatSigned(daily.extensionPct)],
+    ['量／20日均量', daily.volumeRatio20 === null ? 'N/A' : `${daily.volumeRatio20}x`],
+  ].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    grid.append(item);
+  });
+  section.append(grid);
+  const signals = node('ul', 'daily-signal-list');
+  (daily.signals || []).slice(0, 5).forEach((signal) => signals.append(node('li', '', signal)));
+  section.append(signals);
+  if (daily.candles?.length) {
+    const candles = node('div', 'candle-strip');
+    daily.candles.forEach((bar) => {
+      const candle = node('div', `candle-chip ${bar.close >= bar.open ? 'up' : 'down'}`);
+      candle.append(node('span', '', String(bar.date || '').slice(0, 5)), node('strong', '', `${bar.open}→${bar.close}`), node('small', '', `H ${bar.high} · L ${bar.low}`));
+      candles.append(candle);
+    });
+    section.append(candles);
+  }
+  return section;
+}
+
+function researchLayersBlock(review) {
+  const section = node('section', 'research-layers');
+  const head = node('div', 'subsection-head');
+  head.append(node('strong', '', '公司／事件资料层'), pill('资料分层', 'neutral'));
+  section.append(head);
+  const facts = review?.researchLayers?.company || {};
+  const grid = node('div', 'daily-metrics research-metrics');
+  [
+    ['市值', facts.marketCap || 'N/A'], ['P/E', facts.peRatio || 'N/A'], ['EPS', facts.eps || 'N/A'],
+    ['一年目标价', facts.oneYearTarget || 'N/A'], ['Beta', facts.beta || 'N/A'], ['股息率／股息', facts.dividendYield || 'N/A'],
+  ].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    grid.append(item);
+  });
+  const notes = node('div', 'research-notes');
+  [review?.researchLayers?.eventStatus, review?.researchLayers?.earnings, review?.researchLayers?.analyst, review?.researchLayers?.ownership]
+    .filter(Boolean).forEach((text) => notes.append(node('p', '', text)));
+  section.append(grid, notes);
+  return section;
+}
+
+function buildCandidateCard(candidate, rank) {
+  const card = node('article', 'live-result-card build-result-card');
+  const plan = candidate.buildPlan || {};
+  const top = node('div', 'live-result-top');
+  const identity = node('div');
+  identity.append(node('span', 'role-label', `建仓研究候选 ${rank + 1}`), node('strong', 'ticker', candidate.symbol), node('span', 'company', candidate.name));
+  const score = node('div', 'score-badge');
+  score.append(node('strong', '', `${plan.score ?? '—'}%`), node('span', '', '建仓匹配度'));
+  top.append(identity, score);
+  const quote = node('div', 'live-quote');
+  quote.append(node('strong', '', `$${Number(candidate.price).toFixed(2)}`), node('span', Number(candidate.changePct) >= 0 ? 'up' : 'down', formatSigned(candidate.changePct)), pill(plan.status || '待审查', statusTone(plan.status)));
+  card.append(top, quote);
+  if (candidate.catalyst) {
+    const catalyst = node('div', 'catalyst-box');
+    catalyst.append(node('strong', '', `${candidate.catalyst.category} · ${candidate.catalyst.evidenceStatus}`), node('span', '', candidate.catalyst.title));
+    card.append(catalyst);
+  }
+  const reasons = node('ul', 'reason-list');
+  (plan.reasons || []).forEach((reason) => reasons.append(node('li', '', reason)));
+  const planGrid = node('div', 'live-plan build-plan');
+  [
+    ['建仓价格区间', plan.zone || 'N/A'], ['确认条件', plan.trigger || 'N/A'], ['结构失效', plan.invalidation || 'N/A'],
+    ['首个目标／R', `${plan.firstTarget ? `$${plan.firstTarget}` : 'N/A'} · ${plan.estimatedR ?? 'N/A'}R`], ['不追条件', plan.noChase || 'N/A'], ['下一步', plan.nextStep || 'N/A'],
+  ].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    planGrid.append(item);
+  });
+  card.append(reasons, planGrid, dailyStructureBlock(candidate.daily));
+  card.append(node('p', 'live-result-foot', `${candidate.quoteStatus} · ${candidate.earningsRisk ? '当日财报风险，普通建仓计划暂停。' : '价格区间为日线研究区域；券商报价和点差须另行复核。'}`));
+  return card;
+}
+
+function holdingAnalysisCard(candidate) {
+  const card = node('article', 'live-result-card position-result-card');
+  const review = candidate.holdingReview || {};
+  const top = node('div', 'live-result-top');
+  const identity = node('div');
+  identity.append(node('span', 'role-label', '持仓／自选完整体检'), node('strong', 'ticker', candidate.symbol), node('span', 'company', candidate.name));
+  top.append(identity, pill(review.state || '待评估', statusTone(review.state)));
+  const quote = node('div', 'live-quote');
+  quote.append(node('strong', '', `$${Number(candidate.price).toFixed(2)}`), node('span', Number(candidate.changePct) >= 0 ? 'up' : 'down', formatSigned(candidate.changePct)), pill(candidate.daily?.label || '日线待取得', statusTone(candidate.daily?.label)));
+  card.append(top, quote);
+  const action = node('div', 'position-action');
+  action.append(node('strong', '', '当前复核要点'), node('span', '', review.action || '等待日线与事件资料。'));
+  card.append(action, dailyStructureBlock(candidate.daily), researchLayersBlock(review));
+  if (candidate.catalyst) {
+    const catalyst = node('div', 'catalyst-box');
+    catalyst.append(node('strong', '', `${candidate.catalyst.category} · ${candidate.catalyst.evidenceStatus}`), node('span', '', candidate.catalyst.title));
+    card.append(catalyst);
+  }
+  const plan = review.buildPlan || {};
+  const levels = node('div', 'live-plan compact-plan');
+  [
+    ['建仓／加仓研究区', plan.zone || 'N/A'], ['日线失效位', plan.invalidationPrice ? `$${plan.invalidationPrice}` : 'N/A'],
+    ['首个结构目标', plan.firstTarget ? `$${plan.firstTarget}` : 'N/A'], ['建仓研究状态', plan.status || 'N/A'],
+  ].forEach(([label, value]) => {
+    const item = node('div');
+    item.append(node('span', '', label), node('strong', '', value));
+    levels.append(item);
+  });
+  card.append(levels, node('p', 'live-result-foot', '这是持仓／自选的状态体检；不把短线T计划自动套用到原本的中长线持仓。'));
+  return card;
+}
+
 function eventRadarBlock(events) {
   const section = node('section', 'radar-block');
   const head = node('div', 'subsection-head');
@@ -511,16 +636,21 @@ function renderLiveResults(container, result, action, report) {
     continuity.append(node('strong', '', result.continuity.label), node('span', '', result.continuity.detail));
     container.append(continuity);
   }
-  if (result.noTrade) container.append(node('p', 'live-empty no-trade-box', '当前行动分支：保持现金。候选只供观察，必须等大市、触发、费用后净R及券商审计同时合格。'));
+  if (result.noTrade) container.append(node('p', 'live-empty no-trade-box', action === 'build' ? '当前不建立新仓。候选保留在研究名单，等待大市、日线结构、事件和券商执行条件同时合格。' : '当前行动分支：保持现金。候选只供观察，必须等大市、触发、费用后净R及券商审计同时合格。'));
   const displayed = action === 'scan' ? (result.actionableCandidates || []) : (result.candidates || []);
   if (!displayed.length) {
     container.append(node('p', 'live-empty', '暂时无足够数据或无合格候选，保持现金／稍后重试。'));
   } else {
     const list = node('div', 'live-result-list');
-    displayed.forEach((candidate, index) => list.append(liveCandidateCard(candidate, index, action === 'scan' ? candidateRole(index) : '个股审查')));
+    displayed.forEach((candidate, index) => {
+      if (action === 'build') list.append(buildCandidateCard(candidate, index));
+      else if (action === 'analyze') list.append(holdingAnalysisCard(candidate));
+      else list.append(liveCandidateCard(candidate, index, candidateRole(index)));
+    });
     container.append(list);
   }
   if (action === 'scan') container.append(eventRadarBlock(result.eventRadar || []), performanceBlock(report));
+  if (action === 'build' || action === 'analyze') container.append(eventRadarBlock(result.eventRadar || []));
   const warning = node('div', 'live-warning');
   (result.warnings || []).forEach((text) => warning.append(node('p', '', text)));
   container.append(warning);
@@ -637,10 +767,11 @@ function liveTools(report) {
   head.append(title, pill('无需等定时', 'green'));
 
   const panel = node('div', 'card live-control-card');
-  const intro = node('p', 'live-intro', '先跑催化雷达，再检查大市、行业、相对强度、量价、费用后净R及09:35审计。每日冻结主选加3只备选；同一时间只执行一只，全部失效就保持现金。');
+  const intro = node('p', 'live-intro', '做T、建仓研究和持仓体检是三条路线：先查事件，再看大市、行业、日线结构、相对强度、量价与费用。建仓候选显示的是研究价格区和失效条件，不是自动买入指令。');
   const quickActions = node('div', 'quick-actions');
   const holdingsButton = node('button', 'action-button secondary', '分析现有持仓');
   const scanButton = node('button', 'action-button primary', '一键筛选可做T');
+  const buildButton = node('button', 'action-button build', '筛选可建仓');
   const custom = node('div', 'custom-symbols');
   const input = node('input');
   input.placeholder = '输入股票，例如 NVDA, TSLA, AAPL';
@@ -659,6 +790,7 @@ function liveTools(report) {
     requestLiveAnalysis('analyze', symbols, holdingsButton, results, report);
   });
   scanButton.addEventListener('click', () => requestLiveAnalysis('scan', [], scanButton, results, report));
+  buildButton.addEventListener('click', () => requestLiveAnalysis('build', [], buildButton, results, report));
   customButton.addEventListener('click', () => {
     const symbols = input.value.toUpperCase().split(/[\s,，]+/).filter(Boolean);
     if (!symbols.length) {
@@ -673,7 +805,7 @@ function liveTools(report) {
       customButton.click();
     }
   });
-  quickActions.append(holdingsButton, scanButton);
+  quickActions.append(holdingsButton, scanButton, buildButton);
   custom.append(input, customButton);
   panel.append(intro, quickActions, custom, results);
   section.append(head, panel);
